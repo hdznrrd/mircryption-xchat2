@@ -6,6 +6,10 @@ A modified Micryption Plugin for XChat2 feat. DH1080 Keyexchange
 - [Official Micryption forum](http://www.donationcoder.com/Forums/bb/index.php?board=13.0)
 
 # History
+## v0.4.0-alpha - 05/01/07
+ - gjehle: added support for DH1080 key exchange, compatible to FiSH and Mircryption/MIRC (using OpenSSL as backend)
+ - gjehle: fixed a little bug regarding &-prefixed channel names not being handled properly
+
 ## v0.3.3 - 04/17/07
  - gjehle: previous change messed up ACTION handling, fixed it and cleaned up the code
  - gjehle: changed masterkey input box delay to 1.5 seconds

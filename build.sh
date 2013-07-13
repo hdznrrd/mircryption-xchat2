@@ -16,5 +16,7 @@ cd src/xchat
 
 # patch build environment
 cp ../../../mircryption.cpp .
+cp ../../../Makefile .
+cp -r ../../../dh1080 .
 
 make $1 && cp mircryption.so ../../

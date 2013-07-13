@@ -12,11 +12,11 @@ rm -rf build
 mkdir build
 cd build
 cp -r ../3rdparty/MircryptionExtras/FullSources/mircryption/src .
-cd src/xchat
+cd src
 
 # patch build environment
-cp ../../../mircryption.cpp .
-cp ../../../Makefile .
-cp -r ../../../dh1080 .
+cp -r ../../overlay/* .
 
+# make it so!
+cd xchat
 make $1 && cp mircryption.so ../../

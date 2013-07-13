@@ -5,7 +5,26 @@ A modified Micryption Plugin for XChat2 feat. DH1080 Keyexchange
 - [Official Micryption website](http://www.donationcoder.com/Software/Mouser/mircryption/index.php)
 - [Official Micryption forum](http://www.donationcoder.com/Forums/bb/index.php?board=13.0)
 
+# Build
+## Linux
+You'll need the following packages (Debian, Ubuntu) or respective packages for your flavor of Linux
+- `xchat2-common` (header for XChat2 plugin interface)
+- `libssl-dev` (headers and library for OpenSSL DH1080 support)
+
+To build pass the Makefile target of choice to `./build.sh` and magic should happen.
+E.g to build a x64 mircryption.so, simply run `./build.sh nix64bit`
+
+## Windows
+Please see `README.windows.md` for some more instructions. Windows support is untested.
+
+## Other
+Other platforms, even if supported by Micryptions default Makefile are untested and you might have to apply some changes here and there.
+If you do modify the build script for a certain platform, please consider forking the project and putting in a pull request once it works for you.
+
 # History
+## v0.4.1-alpha
+ - dev00: build support on Windows using Win32OpenSSL
+
 ## v0.4.0-alpha - 05/01/07
  - gjehle: added support for DH1080 key exchange, compatible to FiSH and Mircryption/MIRC (using OpenSSL as backend)
  - gjehle: fixed a little bug regarding &-prefixed channel names not being handled properly

@@ -63,7 +63,8 @@
 
 //---------------------------------------------------------------------------
 // xchat plugin version
-#define XMC_VERSIONSTRING "0.3.3"
+#define XMC_VERSIONSTRING "0.4.0-alpha"
+#define DH1080_OPENSSL 1
 //---------------------------------------------------------------------------
 
 
@@ -101,6 +102,10 @@
 // Application includes
 #include "mirc_codes.h"
 #include "mircryption.h"
+#ifdef DH1080_OPENSSL
+	#include "dh1080/dh1080.h"
+	#include <string>
+#endif
 #include <stdlib.h>
 //---------------------------------------------------------------------------
 
@@ -146,6 +151,21 @@ enum eTextEvents {
 /*e*///	,eTeTopicChange
 };
 
+
+#ifdef DH1080_OPENSSL
+struct KeyX
+{
+	static const int WAIT_FOR_REPLY_TIMEOUT_MS=7000;
+	enum eFSM {
+		 IDLE=0
+		,WAIT_FOR_REPLY
+	} state;
+	std::string networkName;
+	std::string peerName;
+	xchat_hook* timeout;
+	DH1080 dh;
+} GLOBAL__KEYX;
+#endif
 //---------------------------------------------------------------------------
 // Uncomment one of these pairs to choose how encrypted messages are formatted
 // Default mircryption method, use [] around encrypted text
@@ -249,6 +269,11 @@ static int mc_notice(char *word[], char *word_eol[], void *userdata);
 
 static int mc_timer_request_masterkey(void *userdata);
 
+#ifdef DH1080_OPENSSL
+static int mc_keyx(char *word[], char *word_eol[], void *userdata);
+static int mc_timer_keyx_timeout(void *userdata);
+#endif
+
 static void mylowercasify(char *str);
 
 void strip_mirc_colors(xchat_plugin*,char*);
@@ -289,6 +314,13 @@ extern "C" int xchat_plugin_init(xchat_plugin *plugin_handle, char **plugin_name
 {
 	// plugin is being loaded
 
+	#ifdef DH1080_OPENSSL
+	GLOBAL__KEYX.state = KeyX::IDLE;
+	GLOBAL__KEYX.networkName = "";
+	GLOBAL__KEYX.peerName = "";
+	GLOBAL__KEYX.timeout = NULL;
+	#endif
+
 	// save this in order to call xchat_* functions
 	ph = plugin_handle;
 
@@ -312,6 +344,10 @@ extern "C" int xchat_plugin_init(xchat_plugin *plugin_handle, char **plugin_name
 	xchat_hook_command(ph, "me", PRI_HIGHEST, mc_action, "Usage: ME <action>", 0);
 	xchat_hook_command(ph, "notice", PRI_HIGHEST, mc_notice, "Usage: NOTICE <nick/channel> <message>, sends a notice. Notices are a type of message that should be auto reacted to", 0);
 	xchat_hook_command(ph, "", PRI_HIGHEST, mc_alltext, "trap all input for encryption", 0);
+
+	#ifdef DH1080_OPENSSL
+		xchat_hook_command(ph, "keyx", PRI_HIGHEST, mc_keyx, "Usage: KEYX [<nick>]", 0);
+	#endif
 
 	// hook the events we want to respond to
 	// gjehle 070405: we actually have to hook the PRIVMSG and NOTICE replies to properly handle incoming text
@@ -464,12 +500,13 @@ static int mc_grand_unified_rawhandler(char *word[], char *word_eol[], void *use
 	// extract some data we might need
 
 	// check who was the target
-	raw_target = (word[RP_TARGET][0] == '#' || word[RP_CMD][0] == '&') ? TR_CHANNEL : TR_PRIVATE;
+	raw_target = (word[RP_TARGET][0] == '#' || word[RP_TARGET][0] == '&') ? TR_CHANNEL : TR_PRIVATE;
 
 	if(!mc_get_nick_from_mask(nick_buf,word[RP_SOURCE]+1)) {
 		xchat_printf(ph,"MCPS: ERROR: failed to extract nickname from hostmask \"%s\"",word[RP_SOURCE]+1);
 		goto exit_eat_none;
 	}
+	mylowercasify(nick_buf);
 
 	// now that we know who's targeted ;-)
 	// we can extract the data that's used to look-up the crypto-key
@@ -488,6 +525,103 @@ static int mc_grand_unified_rawhandler(char *word[], char *word_eol[], void *use
 	// imho this pretty much optimizes speed and maintainability
 	msg_type_action=false;
 	serv_idmsg=false;
+
+	#ifdef DH1080_OPENSSL
+	if( 	raw_target == TR_PRIVATE &&
+		strncmp(word[RP_CMD],"NOTICE",6) == 0 &&
+		strncmp(word[RP_TEXT],":DH1080_",8) == 0) {
+		// DH1080 keyexchange handling
+
+		switch(GLOBAL__KEYX.state) {
+
+		case KeyX::IDLE:
+			if( strncmp(word[RP_TEXT],":DH1080_INIT",12) == 0 ) {
+				char returndata[MAXRETURNSTRINGLEN];
+
+				// does the key seem about right?
+				if( strlen(word[RP_TEXT+1]) != 181 ) {
+					xchat_printf(ph,"MCPS: DH1080 KeyExchange: Received possibly spoofed FINISH from %s on %s."
+							,nick_buf,xchat_get_info(ph,"network"));
+					xchat_commandf(ph,":%s NOTICE %s :DH1080_ABORT Invalid Public Key.",xchat_get_info(ph,"nick"),nick_buf);
+					return EAT_ALL;
+				}
+
+				// already a password set? abort
+				//TODO: gjehle
+				
+				// send public, set key
+				xchat_commandf(ph,":%s NOTICE %s :DH1080_FINISH %s"
+						,xchat_get_info(ph,"nick"),nick_buf,GLOBAL__KEYX.dh.getNewPublicKey());
+
+				mircryptor->mc_setkey(nick_buf,(char*)GLOBAL__KEYX.dh.computeSymetricKey(word[RP_TEXT+1]),returndata);
+				xchat_printf(ph,"MCPS: DH1080 KeyExchange: Received key from %s: %s\n",nick_buf,returndata);
+				return EAT_ALL;
+			}
+			else
+				return EAT_NONE;
+
+
+		case KeyX::WAIT_FOR_REPLY:
+			if( strncmp(word[RP_TEXT],":DH1080_FINISH",14) == 0 ) {
+				if( GLOBAL__KEYX.peerName == nick_buf && GLOBAL__KEYX.networkName == xchat_get_info(ph,"network") )
+				{
+					char returndata[MAXRETURNSTRINGLEN];
+					
+					xchat_unhook(ph,GLOBAL__KEYX.timeout);
+					GLOBAL__KEYX.timeout = NULL;
+
+					if( strlen(word[RP_TEXT+1]) != 181 ) {
+						xchat_commandf(ph,":%s NOTICE %s :DH1080_ABORT Invalid Public Key."
+								,xchat_get_info(ph,"nick"),nick_buf);
+						return EAT_ALL;
+					}
+
+					mircryptor->mc_setkey(nick_buf,(char*)GLOBAL__KEYX.dh.computeSymetricKey(word[RP_TEXT+1]),returndata);
+					xchat_printf(ph,"MCPS: DH1080 KeyExchange: Received key from %s: %s\n",nick_buf,returndata);
+
+					GLOBAL__KEYX.networkName = "";
+					GLOBAL__KEYX.peerName = "";
+					GLOBAL__KEYX.dh.flush();
+					GLOBAL__KEYX.state = KeyX::IDLE;
+					
+					return EAT_ALL;
+				}
+				else {
+					xchat_printf(ph,"MCPS: DH1080 KeyExchange: Received possibly spoofed FINISH from %s on %s "
+						     	"while waiting for a reply from %s on %s."
+							,nick_buf,xchat_get_info(ph,"network")
+							,GLOBAL__KEYX.peerName.c_str(),GLOBAL__KEYX.networkName.c_str());
+					return EAT_NONE;
+				}
+			}
+			else if( strncmp(word[RP_TEXT],":DH1080_ABORT",13) == 0 ) {
+				if( GLOBAL__KEYX.peerName == nick_buf && GLOBAL__KEYX.networkName == xchat_get_info(ph,"network") )
+				{
+					xchat_unhook(ph,GLOBAL__KEYX.timeout);
+					GLOBAL__KEYX.timeout = NULL;
+					GLOBAL__KEYX.networkName = "";
+					GLOBAL__KEYX.peerName = "";
+					GLOBAL__KEYX.dh.flush();
+					GLOBAL__KEYX.state = KeyX::IDLE;
+
+					xchat_printf(ph,"MCPS: DH1080 KeyExchange: Key exchange aborted by peer \"%s\": %s."
+							,nick_buf,word_eol[RP_TEXT+1]);
+					return EAT_ALL;
+				}
+				else {
+					xchat_printf(ph,"MCPS: DH1080 KeyExchange: Received possibly spoofed ABORT from %s on %s "
+						     "while waiting for a reply from %s on %s."
+							,nick_buf,xchat_get_info(ph,"network")
+							,GLOBAL__KEYX.peerName.c_str(),GLOBAL__KEYX.networkName.c_str());
+					return EAT_NONE;
+				}
+			}
+			else
+				return EAT_NONE;
+
+		}
+	}
+	#endif //DH1080_OPENSSL
 
 msg_iscrypt_match:
 	if(		strncmp(text_crypted_v,"+OK ",4) == 0 ||
@@ -683,6 +817,81 @@ static int mc_event_changenick(char *word[], void *userdata)
 	return EAT_NONE;
 }
 
+
+#ifdef DH1080_OPENSSL
+//---------------------------------------------------------------------------
+/// \brief initiate a DH1080 keyexchange
+/// \author Gregor Jehle <gjehle@gmail.com>
+/// \param word see xchat documentation
+/// \param userdata see xchat documentation
+/// \return EAT_ALL or EAT_NONE (see xchat documentation)
+static int mc_keyx(char *word[], char *word_eol[], void *userdata)
+{
+	char target[MAXCHANNELNAMESIZE];
+
+	if(GLOBAL__KEYX.state == KeyX::WAIT_FOR_REPLY)
+	{
+		xchat_printf(ph,"MCPS: DH1080 KeyExchange: There is already a key exchange with %s on %s in progress, please wait.\n"
+				,GLOBAL__KEYX.peerName.c_str(), GLOBAL__KEYX.networkName.c_str());
+		return EAT_ALL;
+	}
+
+	if( word[2] )
+		mcnicksafe_strcpy(target,word[2]); 
+	else
+	{
+		//mcnicksafe_strcpy(target,xchat_get_info(ph, "channel")); 
+		//TODO: gjehle: no param, get current window name
+		xchat_print(ph,"KEYX: Usage: /keyx <nick>");
+		return EAT_ALL;
+	}
+
+	mylowercasify(target);
+
+	if(target[0] == '#' || target[0] == '&') {
+		xchat_printf(ph,"MCPS: DH1080 KeyExchange: Key exchange can't have a channel name as a target.\n");
+		return EAT_ALL;
+	}
+
+	GLOBAL__KEYX.peerName = target;
+	GLOBAL__KEYX.networkName = xchat_get_info(ph,"network");
+	GLOBAL__KEYX.state = KeyX::WAIT_FOR_REPLY;
+	GLOBAL__KEYX.timeout = xchat_hook_timer(ph,GLOBAL__KEYX.WAIT_FOR_REPLY_TIMEOUT_MS,mc_timer_keyx_timeout,0);
+
+	GLOBAL__KEYX.dh.flush();
+	xchat_commandf(ph,":%s NOTICE %s :DH1080_INIT %s",xchat_get_info(ph,"nick"),target,GLOBAL__KEYX.dh.getNewPublicKey());
+
+	xchat_printf(ph,"MCPS: DH1080 KeyExchange: Initiated key exchange with %s.\n",target);
+
+
+	return EAT_ALL;
+}
+
+//---------------------------------------------------------------------------
+/// \brief timer callback in case a DH1080 request timed out
+/// \author Gregor Jehle <gjehle@gmail.com>
+/// \param userdata see xchat documentation
+/// \return 1 to keep timer going, 0 to stop it
+static int mc_timer_keyx_timeout(void *userdata)
+{
+	//TODO: gjehle: unhook might cause failure if we return 0
+	xchat_unhook(ph,GLOBAL__KEYX.timeout);
+	GLOBAL__KEYX.timeout = NULL;
+
+	xchat_printf(ph,"MCPS: DH1080 KeyExchange: Exchange with %s on %s timed out\n"
+			,GLOBAL__KEYX.peerName.c_str(),GLOBAL__KEYX.networkName.c_str());
+	GLOBAL__KEYX.networkName = "";
+	GLOBAL__KEYX.peerName = "";
+	GLOBAL__KEYX.dh.flush();
+
+
+
+	GLOBAL__KEYX.state = KeyX::IDLE;
+
+	
+	return 0;
+}
+#endif //DH1080_OPENSSL
 
 static int mc_event_topic(char *word[], void *userdata)
 {
